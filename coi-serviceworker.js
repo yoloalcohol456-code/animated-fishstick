@@ -35,51 +35,43 @@ if (typeof window === 'undefined') {
         }
     });
 
-    // Caching Strategy modification for full offline asset independence
     self.addEventListener("fetch", function (event) {
         const r = event.request;
+
+        // OPTIMIZATION PATCH: Do not intercept or process local blob addresses/non-HTTP protocols 
+        // This stops massive memory leaks and crashes when assembling large PSP ISOs via your chunking strategy
+        if (!r.url.startsWith('http')) return;
+
         if (r.cache === "only-if-cached" && r.mode !== "same-origin") return;
 
-        const request = (coepCredentialless && r.mode === "no-cors")
-            ? new Request(r, { credentials: "omit" })
-            : r;
-
-        // Check if the request targets EmulatorJS CDNs or local application layout
-        const isCacheableTarget = r.url.includes("emulatorjs.org") || r.url.includes("jsdelivr.net") || r.url.includes(self.location.origin);
-
-        if (isCacheableTarget && r.method === "GET") {
-            event.respondWith(
-                caches.match(request).then((cachedResponse) => {
-                    if (cachedResponse) {
-                        return injectSecurityHeaders(cachedResponse);
-                    }
-                    return fetch(request).then((networkResponse) => {
-                        const copy = networkResponse.clone();
-                        caches.open(CACHE_NAME).then((cache) => {
-                            cache.put(request, copy);
-                        });
+        event.respondWith(
+            caches.match(r).then((cachedResponse) => {
+                // Network-first approach with graceful cache fallback for continuous offline gameplay
+                return fetch(r)
+                    .then((networkResponse) => {
+                        if (networkResponse && networkResponse.status === 200) {
+                            const responseToCache = networkResponse.clone();
+                            caches.open(CACHE_NAME).then((cache) => {
+                                cache.put(r, responseToCache);
+                            });
+                        }
                         return injectSecurityHeaders(networkResponse);
+                    })
+                    .catch(() => {
+                        if (cachedResponse) {
+                            return injectSecurityHeaders(cachedResponse);
+                        }
                     });
-                }).catch((err) => {
-                    console.error("[Offline SW] Fetch fallback error:", err);
-                    return fetch(request);
-                })
-            );
-        } else {
-            event.respondWith(fetch(request).then((res) => injectSecurityHeaders(res)).catch((e) => console.error(e)));
-        }
+            })
+        );
     });
 
 } else {
     (() => {
-        const reloadedBySelf = window.sessionStorage.getItem("coiReloadedBySelf");
-        window.sessionStorage.removeItem("coiReloadedBySelf");
-        const coepDegrading = (reloadedBySelf == "coepdegrade");
-
         const coi = {
-            shouldRegister: () => !reloadedBySelf,
+            shouldRegister: () => true,
             shouldDeregister: () => false,
-            coepCredentialless: () => true,
+            coepCredentialless: () => false,
             coepDegrade: () => true,
             doReload: () => window.location.reload(),
             quiet: false,
@@ -87,24 +79,11 @@ if (typeof window === 'undefined') {
         };
 
         const n = navigator;
-        const controlling = n.serviceWorker && n.serviceWorker.controller;
-
-        if (controlling && !window.crossOriginIsolated) {
-            window.sessionStorage.setItem("coiCoepHasFailed", "true");
-        }
-        const coepHasFailed = window.sessionStorage.getItem("coiCoepHasFailed");
-
-        if (controlling) {
-            const reloadToDegrade = coi.coepDegrade() && !(coepDegrading || window.crossOriginIsolated);
+        if (n.serviceWorker && n.serviceWorker.controller) {
             n.serviceWorker.controller.postMessage({
                 type: "coepCredentialless",
-                value: (reloadToDegrade || coepHasFailed && coi.coepDegrade()) ? false : coi.coepCredentialless(),
+                value: coi.coepCredentialless(),
             });
-            if (reloadToDegrade) {
-                !coi.quiet && console.log("Reloading page to degrade COEP.");
-                window.sessionStorage.setItem("coiReloadedBySelf", "coepdegrade");
-                coi.doReload("coepdegrade");
-            }
             if (coi.shouldDeregister()) {
                 n.serviceWorker.controller.postMessage({ type: "deregister" });
             }
